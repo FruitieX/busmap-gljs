@@ -13,21 +13,28 @@ const useMap = () => {
 
     const map = new mapboxgl.Map({
       container: 'mapbox-root',
-      style: 'mapbox://styles/mapbox/streets-v9',
+      style: 'mapbox://styles/mapbox/streets-v11',
+
+      // Helsinki city centre
       center: [24.95, 60.17],
       zoom: 12,
-      minZoom: 10,
+
+      // Roughly corresponds to Greater Helsinki area
       maxBounds: [[24, 59.8], [26, 60.5]],
+      minZoom: 10,
     });
 
-    map.addControl(
-      new mapboxgl.GeolocateControl({
-        positionOptions: {
-          enableHighAccuracy: true,
-        },
-        trackUserLocation: true,
-      }),
-    );
+    const geolocateControl = new mapboxgl.GeolocateControl({
+      positionOptions: {
+        enableHighAccuracy: true,
+      },
+      trackUserLocation: true,
+    });
+
+    map.addControl(geolocateControl);
+
+    // Immediately try triggering geolocation
+    map.on('load', () => geolocateControl.trigger());
 
     setMap(some(map));
 
@@ -39,7 +46,7 @@ const useMap = () => {
 };
 
 const createMarkers = (count: number) =>
-  range(1, count).map((value, index) =>
+  range(1, count).map(() =>
     // Set initial coords, otherwise mapbox explodes
     new mapboxgl.Marker().setLngLat([0, 0]),
   );
