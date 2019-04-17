@@ -1,28 +1,55 @@
-import React, { Component } from 'react';
-import logo from './logo.svg';
-import './App.css';
+import React from 'react';
+import styled from 'styled-components';
+import * as Sentry from '@sentry/browser';
 
-class App extends Component {
+import { Header } from './Header';
+import { Map } from './Map';
+
+const Layout = styled.div`
+  display: grid;
+
+  width: 100vw;
+  height: 100vh;
+
+  grid-template-rows: 2rem auto;
+`;
+
+interface State {
+  error?: any;
+  eventId?: string;
+}
+
+export class App extends React.PureComponent<State> {
+  state: State = {};
+
+  componentDidCatch(error: any, errorInfo: any) {
+    this.setState({ error });
+    Sentry.withScope(scope => {
+      scope.setExtras(errorInfo);
+      const eventId = Sentry.captureException(error);
+      this.setState({ eventId });
+    });
+  }
+
   render() {
+    if (this.state.error) {
+      //render fallback UI
+      return (
+        <a
+          onClick={() =>
+            Sentry.showReportDialog({ eventId: this.state.eventId })
+          }
+        >
+          Report feedback
+        </a>
+      );
+    }
+
     return (
-      <div className="App">
-        <header className="App-header">
-          <img src={logo} className="App-logo" alt="logo" />
-          <p>
-            Edit <code>src/App.tsx</code> and save to reload.
-          </p>
-          <a
-            className="App-link"
-            href="https://reactjs.org"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Learn React
-          </a>
-        </header>
-      </div>
+      <Layout>
+        <Header />
+        <Map />
+      </Layout>
     );
   }
 }
-
-export default App;
