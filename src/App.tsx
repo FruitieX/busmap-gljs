@@ -143,6 +143,10 @@ const useRealtimeData = (routes: Route[]) => (client: Option<MqttClient>) => {
                 coordinates: [apiVehicle.long, apiVehicle.lat],
                 gtfsId: route.gtfsId,
                 lastUpdate: new Date().getTime(),
+                destination: 'N/A',
+                acceleration: apiVehicle.acc,
+                speed: apiVehicle.spd / 3.6, // km/h -> m/s
+                heading: (apiVehicle.hdg / 360) * 2 * Math.PI, // degrees -> radians
               },
               data.current,
             );
