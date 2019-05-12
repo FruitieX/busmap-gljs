@@ -1,8 +1,11 @@
 import React, { useEffect, useState, useLayoutEffect } from 'react';
 import styled from 'styled-components';
-import mapboxgl from 'mapbox-gl';
+import mapboxgl, { GeoJSONSource, GeoJSONSourceRaw } from 'mapbox-gl';
 import { none, some, Option } from 'fp-ts/es6/Option';
-import { range } from 'fp-ts/es6/Array';
+import { MqttClient } from 'mqtt';
+import { Route, Vehicles, Vehicle } from './types';
+import { StrMap, lookup } from 'fp-ts/es6/StrMap';
+import { Point } from 'geojson';
 
 const useMap = () => {
   const [mapState, setMap] = useState<Option<mapboxgl.Map>>(none);
@@ -33,10 +36,13 @@ const useMap = () => {
 
     map.addControl(geolocateControl);
 
-    // Immediately try triggering geolocation
-    map.on('load', () => geolocateControl.trigger());
+    map.on('load', () => {
+      // Immediately try triggering geolocation
+      geolocateControl.trigger();
 
-    setMap(some(map));
+      // Only hand over access to map after it has loaded
+      setMap(some(map));
+    });
 
     return () => map.remove();
   }, []);
@@ -45,32 +51,89 @@ const useMap = () => {
   return [mapState, setMap] as [typeof mapState, typeof setMap];
 };
 
-const createMarkers = (count: number) =>
-  range(1, count).map(() =>
-    // Set initial coords, otherwise mapbox explodes
-    new mapboxgl.Marker().setLngLat([0, 0]),
-  );
+interface Marker {
+  source: mapboxgl.GeoJSONSource;
+}
 
-const useMarkers = (mapState: Option<mapboxgl.Map>) => {
-  const [markersState, setMarkers] = useState<Option<mapboxgl.Marker[]>>(none);
+type Markers = StrMap<Marker>;
 
-  const markerCount = 5;
+const getVehicleGeoJSONData = (
+  vehicleId: string,
+  vehicle: Vehicle,
+): GeoJSON.Feature<Point> => ({
+  type: 'Feature',
+  geometry: {
+    type: 'Point',
+    coordinates: vehicle.coordinates,
+  },
+  properties: {
+    title: vehicleId,
+    icon: 'bus',
+  },
+});
+
+const createMarkers = (vehicles: Vehicles) => (mapbox: mapboxgl.Map): Markers =>
+  vehicles.mapWithKey((vehicleId, vehicle) => {
+    mapbox.addLayer({
+      id: vehicleId,
+      type: 'symbol',
+      source: {
+        type: 'geojson',
+        data: getVehicleGeoJSONData(vehicleId, vehicle),
+      },
+      layout: {
+        'icon-image': '{icon}',
+        'icon-allow-overlap': true,
+        'text-field': '{title}',
+        'text-font': ['Open Sans Semibold', 'Arial Unicode MS Bold'],
+        'text-offset': [0, 0.6],
+        'text-anchor': 'top',
+        'text-allow-overlap': true,
+      },
+      paint: {
+        'icon-color': '#202',
+        'text-color': '#202',
+        'text-halo-color': '#fff',
+        'text-halo-width': 2,
+      },
+    });
+
+    mapbox.on('mouseenter', vehicleId, () => {
+      mapbox.getCanvas().style.cursor = 'pointer';
+    });
+
+    mapbox.on('mouseleave', vehicleId, () => {
+      mapbox.getCanvas().style.cursor = '';
+    });
+
+    const source = mapbox.getSource(vehicleId);
+
+    if (source.type !== 'geojson') throw new Error('blabla');
+
+    return { source };
+  });
+
+const removeMarkers = (vehicles: Vehicles) => (mapbox: mapboxgl.Map) =>
+  vehicles.map(vehicle => mapbox.removeLayer(vehicle.gtfsId));
+
+const useMarkers = (vehicles: Vehicles) => (mapState: Option<mapboxgl.Map>) => {
+  const [markersState, setMarkers] = useState<Markers>(new StrMap({}));
+
   useEffect(() => {
-    const markers = createMarkers(markerCount);
-
-    // Add each marker to the map
-    mapState.map(map => markers.forEach(marker => marker.addTo(map)));
-
-    setMarkers(some(markers));
+    // Create markers for given vehicles, add them to map
+    const markers = mapState.map(createMarkers(vehicles));
+    markers.map(setMarkers);
 
     // Remove markers from map on effect cleanup
-    return () => markers.forEach(marker => marker.remove());
-  }, [markerCount, mapState]);
+    return () => {
+      mapState.map(removeMarkers(vehicles));
+    };
+  }, [vehicles, mapState]);
 
   return [markersState, setMarkers] as [typeof markersState, typeof setMarkers];
 };
 
-const useAnimation = (callback: (timestamp: number) => void) => {
+const useAnimationFrame = (callback: (timestamp: number) => void) => {
   useEffect(() => {
     let animationFrame: number;
 
@@ -86,23 +149,31 @@ const useAnimation = (callback: (timestamp: number) => void) => {
   });
 };
 
-const animateMarkers = (map: mapboxgl.Map) => (markers: mapboxgl.Marker[]) =>
-  markers.forEach((marker, index) => {
-    const timestamp = new Date().getTime() / 1000 + index;
+const animateMarkers = (vehicles: Vehicles) => (markers: Markers) =>
+  vehicles.mapWithKey((vehicleId, vehicle) => {
+    const marker = lookup(vehicleId, markers);
 
-    marker.setLngLat([
-      Math.cos(timestamp) * 0.01 + 24.95,
-      Math.sin(timestamp) * 0.01 + 60.17,
-    ]);
+    marker.map(m =>
+      m.source.setData(getVehicleGeoJSONData(vehicleId, vehicle)),
+    );
   });
 
 const MapContainer = styled.main``;
 
-export const Map: React.FunctionComponent = () => {
-  const [mapState, setMap] = useMap();
-  const [markersState, setMarkers] = useMarkers(mapState);
+interface MapProps {
+  rtApi: Option<MqttClient>;
+  routes: Route[];
+  vehicles: React.MutableRefObject<Vehicles>;
+}
 
-  useAnimation(() => markersState.ap(mapState.map(animateMarkers)));
+export const Map: React.FunctionComponent<MapProps> = ({ vehicles }) => {
+  const [mapState] = useMap();
+
+  const [markers] = useMarkers(vehicles.current)(mapState);
+
+  useAnimationFrame(() => {
+    animateMarkers(vehicles.current)(markers);
+  });
 
   return <MapContainer id="mapbox-root" />;
 };
