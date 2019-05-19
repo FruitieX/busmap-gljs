@@ -4,7 +4,7 @@ import { none, some, Option, fromNullable, option } from 'fp-ts/es6/Option';
 import { connect, MqttClient } from 'mqtt';
 
 import { Header } from './Header';
-import { Map } from './Map';
+import { MapComponent } from './Map';
 import { last, difference, array, mapOption, flatten } from 'fp-ts/es6/Array';
 import { Setoid } from 'fp-ts/es6/Setoid';
 import { Route, Vehicles, Vehicle } from './types';
@@ -15,7 +15,6 @@ const Layout = styled.div`
   width: 100vw;
   height: 100vh;
 
-  grid-template-rows: 4rem auto;
 `;
 
 // Connects to realtime API
@@ -45,7 +44,8 @@ const gtfsIdRe = /.+:(.+)/;
 const getSubscriptionTopic = (route: Route) =>
   fromNullable(route.gtfsId.match(gtfsIdRe))
     .chain(last)
-    .map(lineId => `/hfp/v1/journey/+/+/+/+/${lineId}/#`);
+    //.map(lineId => `/hfp/v1/journey/+/+/+/+/${lineId}/#`);
+    .map(lineId => `/hfp/v1/journey/+/+/+/+/+/#`);
 
 // Subscribes to given routes
 const useRouteSubscriptions = (routes: Route[]) => (
@@ -79,7 +79,7 @@ const useRouteSubscriptions = (routes: Route[]) => (
 };
 
 import * as t from 'io-ts';
-import { StrMap, pop, remove, insert } from 'fp-ts/es6/StrMap';
+import { StrMap, pop, remove, insert, lookup } from 'fp-ts/es6/StrMap';
 
 const ApiVehicle = t.type({
   acc: t.number,
@@ -117,8 +117,20 @@ const ApiVehicleResponse = t.type({
 const getVehicleId = (gtfsId: string, vehicleNo: number) =>
   `${gtfsId}/${vehicleNo}`;
 
+export interface RealtimeDataState {
+  vehicles: StrMap<Vehicle>;
+  iterationOrder: string[];
+}
+
 const useRealtimeData = (routes: Route[]) => (client: Option<MqttClient>) => {
-  const data = useRef<StrMap<Vehicle>>(new StrMap({}));
+  const data = useRef<RealtimeDataState>({
+    vehicles: new StrMap({}),
+
+    // Remember a constant iteration order for when drawing vehicles, as we
+    // can't pass vehicleId to deck.gl and if the iteration order is not
+    // constant the transitions will break
+    iterationOrder: [],
+  });
 
   useEffect(() => {
     const listener = (topic: string, message: Buffer) => {
@@ -128,27 +140,56 @@ const useRealtimeData = (routes: Route[]) => (client: Option<MqttClient>) => {
             route => route.shortName === apiVehicle.desi,
           );
 
-          if (!route) return;
+          // if (!route) return;
+          // const gtfsId = route.gtfsId
+          const gtfsId = apiVehicle.desi;
 
-          const vehicleId = getVehicleId(route.gtfsId, apiVehicle.veh);
+          const vehicleId = getVehicleId(gtfsId, apiVehicle.veh);
+          const vehicle = lookup(vehicleId, data.current.vehicles);
+
+          if (vehicle.isNone()) {
+            // Vehicle has not been seen before, add it to iterationOrder
+            data.current.iterationOrder = [
+              ...data.current.iterationOrder,
+              vehicleId,
+            ];
+
+            // console.log(
+            //   `tracking ${data.current.iterationOrder.length} vehicles`,
+            // );
+          }
+
+          const t = new Date().getTime();
 
           if (!apiVehicle.long || !apiVehicle.lat) {
-            // Vehicle transponder offline, remove vehicle
-            data.current = remove(vehicleId, data.current);
+            // Vehicle transponder offline, deactivate vehicle if it exists
+            vehicle.map(vehicle => {
+              data.current.vehicles = insert(
+                vehicleId,
+                { ...vehicle, active: false },
+                data.current.vehicles,
+              );
+            });
           } else {
             // Update vehicle location
-            data.current = insert(
+            data.current.vehicles = insert(
               vehicleId,
               {
                 coordinates: [apiVehicle.long, apiVehicle.lat],
-                gtfsId: route.gtfsId,
-                lastUpdate: new Date().getTime(),
+                gtfsId: gtfsId,
+                lastUpdate: t,
+                lastPing: vehicle.fold(t, vehicle => {
+                  // Show roughly one ping update every two seconds
+                  if (vehicle.lastPing + 1700 > t) return vehicle.lastPing;
+                  return t;
+                }),
                 destination: 'N/A',
                 acceleration: apiVehicle.acc,
                 speed: apiVehicle.spd / 3.6, // km/h -> m/s
                 heading: (apiVehicle.hdg / 360) * 2 * Math.PI, // degrees -> radians
+                active: true,
               },
-              data.current,
+              data.current.vehicles,
             );
           }
         },
@@ -170,12 +211,12 @@ export const App: React.FunctionComponent = () => {
   const [rtApi] = useRealTimeApi('wss://mqtt.hsl.fi');
   useRouteSubscriptions(routes)(rtApi);
 
-  const vehicles = useRealtimeData(routes)(rtApi);
+  const vehicleData = useRealtimeData(routes)(rtApi);
 
   return (
     <Layout>
-      <Header />
-      <Map rtApi={rtApi} routes={routes} vehicles={vehicles} />
+      {/* <Header /> */}
+      <MapComponent rtApi={rtApi} routes={routes} vehicleData={vehicleData} />
     </Layout>
   );
 };

@@ -7,7 +7,9 @@ export interface Vehicle {
   acceleration: number;
   heading: number;
   lastUpdate: number;
+  lastPing: number;
   destination: string;
+  active: boolean;
 }
 
 export type Vehicles = StrMap<Vehicle>;

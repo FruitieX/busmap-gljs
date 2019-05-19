@@ -1,213 +1,38 @@
-import React, { useEffect, useState, useLayoutEffect } from 'react';
-import styled from 'styled-components';
-import mapboxgl, { GeoJSONSource, GeoJSONSourceRaw } from 'mapbox-gl';
-import { none, some, Option } from 'fp-ts/es6/Option';
+import React, { useEffect } from 'react';
+import mapboxgl from 'mapbox-gl';
+import { Option } from 'fp-ts/es6/Option';
 import { MqttClient } from 'mqtt';
-import { Route, Vehicles, Vehicle } from './types';
-import { StrMap, lookup } from 'fp-ts/es6/StrMap';
-import { Point } from 'geojson';
+import { Route, Vehicle } from './types';
+import { lookup } from 'fp-ts/es6/StrMap';
 
-const useMap = () => {
-  const [mapState, setMap] = useState<Option<mapboxgl.Map>>(none);
-
-  // Map initialization effect
-  useLayoutEffect(() => {
-    mapboxgl.accessToken = process.env.REACT_APP_MAPBOX_TOKEN!;
-
-    const map = new mapboxgl.Map({
-      container: 'mapbox-root',
-      style: 'mapbox://styles/mapbox/streets-v11',
-
-      // Helsinki city centre
-      center: [24.95, 60.17],
-      zoom: 12,
-
-      // Roughly corresponds to Greater Helsinki area
-      maxBounds: [[24, 59.8], [26, 60.5]],
-      minZoom: 10,
-    });
-
-    const geolocateControl = new mapboxgl.GeolocateControl({
-      positionOptions: {
-        enableHighAccuracy: true,
-      },
-      trackUserLocation: true,
-    });
-
-    map.addControl(geolocateControl);
-
-    map.on('load', () => {
-      // Immediately try triggering geolocation
-      geolocateControl.trigger();
-
-      // Only hand over access to map after it has loaded
-      setMap(some(map));
-    });
-
-    return () => map.remove();
-  }, []);
-
-  // TODO: replace with 'as const' once CRA updates to recent enough Babel version
-  return [mapState, setMap] as [typeof mapState, typeof setMap];
-};
-
-interface Marker {
-  update: (vehicle: Vehicle) => void;
-}
-
-type Markers = StrMap<Marker>;
+import { ScatterplotLayer, TextLayer } from '@deck.gl/layers';
+import DeckGL from '@deck.gl/react';
+import ReactMapGL, {
+  ViewState,
+  GeolocateControl,
+  ViewStateChangeInfo,
+} from 'react-map-gl';
+import { RealtimeDataState } from './App';
 
 // these are 100% made up
 const metersToLatitude = (m: number) => (m / 40000) * 1.3;
 const metersToLongitude = (m: number) => (m / 20000) * 1.3;
 
-const calcVehicleCoordinates = (vehicle: Vehicle, delta = 0) => {
-  const v = Math.max(0, vehicle.speed + (vehicle.acceleration / 2) * delta);
+const getVehicleUpdateDelta = (lastUpdate: number) =>
+  (new Date().getTime() - lastUpdate) / 1000;
 
-  const diffX = metersToLongitude(v * Math.sin(vehicle.heading)) * delta;
-  const diffY = metersToLatitude(v * Math.cos(vehicle.heading)) * delta;
+const calcVehicleCoordinates = (vehicle: Vehicle) => {
+  const delta = getVehicleUpdateDelta(vehicle.lastUpdate);
+  const speed = Math.max(
+    0,
+    vehicle.speed,
+    // (vehicle.speed + vehicle.speed * vehicle.acceleration * delta) *
+    //   Math.max(0, 1 - delta * 0.5),
+  );
+
+  const diffX = metersToLongitude(speed * Math.sin(vehicle.heading)) * delta;
+  const diffY = metersToLatitude(speed * Math.cos(vehicle.heading)) * delta;
   return [vehicle.coordinates[0] + diffX, vehicle.coordinates[1] + diffY];
-};
-
-const getVehicleGeoJSONData = (
-  vehicleId: string,
-  vehicle: Vehicle,
-  delta?: number,
-): GeoJSON.Feature<Point> => ({
-  type: 'Feature',
-  geometry: {
-    type: 'Point',
-    coordinates: calcVehicleCoordinates(vehicle, delta),
-  },
-  properties: {
-    title: vehicleId,
-    icon: 'bus',
-  },
-});
-
-const getPingGeoJSONData = (
-  vehicle: Vehicle,
-  delta?: number,
-): GeoJSON.Point => ({
-  type: 'Point',
-  coordinates: calcVehicleCoordinates(vehicle, delta),
-});
-
-const getPingId = (vehicleId: string) => `${vehicleId}-ping`;
-
-const createMarkers = (vehicles: Vehicles) => (mapbox: mapboxgl.Map) =>
-  vehicles.mapWithKey((vehicleId, vehicle) => {
-    console.log(`Adding layer for vehicleId: ${vehicleId}`);
-
-    mapbox.addLayer({
-      id: getPingId(vehicleId),
-      type: 'circle',
-      source: {
-        type: 'geojson',
-        data: getPingGeoJSONData(vehicle),
-      } as any,
-      paint: {
-        'circle-radius': 0,
-        'circle-opacity': 1,
-        'circle-radius-transition': { duration: 0 },
-        'circle-opacity-transition': { duration: 0 },
-        'circle-color': '#007cbf',
-      },
-    });
-
-    mapbox.addLayer({
-      id: vehicleId,
-      type: 'symbol',
-      source: {
-        type: 'geojson',
-        data: getVehicleGeoJSONData(vehicleId, vehicle),
-      },
-      layout: {
-        'icon-image': '{icon}',
-        'icon-allow-overlap': true,
-        'icon-ignore-placement': true,
-        'text-field': '{title}',
-        'text-font': ['Open Sans Semibold', 'Arial Unicode MS Bold'],
-        'text-offset': [0, 0.6],
-        'text-anchor': 'top',
-        'text-allow-overlap': true,
-        'text-optional': true,
-      },
-      paint: {
-        'icon-color': '#202',
-        'text-color': '#202',
-        'text-halo-color': '#fff',
-        'text-halo-width': 2,
-      },
-    });
-
-    mapbox.on('mouseenter', vehicleId, () => {
-      mapbox.getCanvas().style.cursor = 'pointer';
-    });
-
-    mapbox.on('mouseleave', vehicleId, () => {
-      mapbox.getCanvas().style.cursor = '';
-    });
-
-    const source = mapbox.getSource(vehicleId);
-    const pingSource = mapbox.getSource(getPingId(vehicleId));
-
-    if (source.type !== 'geojson') throw new Error('blabla');
-    if (pingSource.type !== 'geojson') throw new Error('blabla');
-
-    let renderedCoordinates = vehicle.coordinates;
-
-    const update = (vehicle: Vehicle) => {
-      const d = (new Date().getTime() - vehicle.lastUpdate) / 1000;
-      if (
-        renderedCoordinates[0] !== vehicle.coordinates[0] ||
-        renderedCoordinates[1] !== vehicle.coordinates[1]
-      ) {
-        source.setData(getVehicleGeoJSONData(vehicleId, vehicle, d));
-        pingSource.setData(getPingGeoJSONData(vehicle, d) as any);
-        renderedCoordinates = vehicle.coordinates;
-      }
-
-      // mapbox.setPaintProperty(
-      //   getPingId(vehicleId),
-      //   'circle-radius',
-      //   Math.min((0.25 + d * 0.75) * 16, 16),
-      // );
-      // mapbox.setPaintProperty(
-      //   getPingId(vehicleId),
-      //   'circle-opacity',
-      //   Math.max(1 - d, 0),
-      // );
-    };
-
-    return { update };
-  });
-
-const removeMarkers = (vehicles: Vehicles) => (mapbox: mapboxgl.Map) =>
-  vehicles.mapWithKey(vehicleId => {
-    console.log(`Removing layer for vehicleId: ${vehicleId}`);
-    mapbox.removeLayer(vehicleId);
-    mapbox.removeSource(vehicleId);
-
-    mapbox.removeLayer(getPingId(vehicleId));
-    mapbox.removeSource(getPingId(vehicleId));
-  });
-
-const useMarkers = (vehicles: Vehicles) => (mapState: Option<mapboxgl.Map>) => {
-  const [markersState, setMarkers] = useState<Markers>(new StrMap({}));
-
-  useEffect(() => {
-    // Create markers for given vehicles, add them to map
-    const markers = mapState.map(createMarkers(vehicles));
-    markers.map(setMarkers);
-
-    // Remove markers from map on effect cleanup
-    return () => {
-      mapState.map(removeMarkers(vehicles));
-    };
-  }, [vehicles, mapState]);
-
-  return [markersState, setMarkers] as [typeof markersState, typeof setMarkers];
 };
 
 const useAnimationFrame = (callback: (timestamp: number) => void) => {
@@ -226,28 +51,152 @@ const useAnimationFrame = (callback: (timestamp: number) => void) => {
   });
 };
 
-const animateMarkers = (vehicles: Vehicles) => (markers: Markers) =>
-  vehicles.mapWithKey((vehicleId, vehicle) => {
-    const marker = lookup(vehicleId, markers);
-    marker.map(marker => marker.update(vehicle));
-  });
+const fallbackCoordinates = [0, 0];
+interface VehicleMapData {
+  coordinates: [number, number];
+  delta: number;
+  destination: string;
+  route: string;
+  active: boolean;
+}
+const animateMarkers = (vehicleData: RealtimeDataState) => (
+  deckGlRef: React.RefObject<DeckGL>,
+) => {
+  if (deckGlRef.current) {
+    const data = vehicleData.iterationOrder.map(
+      vehicleId =>
+        lookup(vehicleId, vehicleData.vehicles)
+          .map(vehicle => ({
+            coordinates: vehicle.active
+              ? calcVehicleCoordinates(vehicle)
+              : fallbackCoordinates,
+            delta: getVehicleUpdateDelta(vehicle.lastPing),
+            destination: vehicle.destination,
+            route: vehicle.gtfsId,
+            active: vehicle.active,
+          }))
+          .toNullable()!,
+    );
 
-const MapContainer = styled.main``;
+    // @ts-ignore
+    deckGlRef.current.deck.setProps({
+      layers: [
+        new ScatterplotLayer({
+          id: 'vehicle-pings',
+          data,
+          dataComparator: () => false,
+          getPosition: (vehicle: VehicleMapData) => [
+            vehicle.coordinates[0],
+            vehicle.coordinates[1],
+            vehicle.delta,
+          ],
+          getRadius: (vehicle: VehicleMapData) =>
+            Math.min((0.25 + vehicle.delta * 0.75 * 0.5) * 16, 16),
+          getFillColor: (vehicle: VehicleMapData) => [
+            0,
+            124,
+            191,
+            Math.max(1 - vehicle.delta * 0.5, 0) * 255,
+          ],
+        } as any),
+        // new IconLayer({
+        //   id: 'vehicle-icons',
+        //   data,
+        //   pickable: true,
+        //   sizeScale: 15,
+        // })
+        new TextLayer({
+          id: 'vehicle-names',
+          data,
+          getPosition: (vehicle: VehicleMapData) => [
+            vehicle.coordinates[0] + 0.0002,
+            vehicle.coordinates[1],
+            10,
+          ],
+          getText: (vehicle: VehicleMapData) => `${vehicle.route}`, // (${vehicle.destination})`,
+          getSize: 50,
+          sizeMinPixels: 12,
+          sizeMaxPixels: 26,
+          sizeUnits: 'meters',
+          getTextAnchor: 'start',
+          getAlignmentBaseline: 'center',
+        } as any),
+      ],
+    });
+  }
+};
 
 interface MapProps {
   rtApi: Option<MqttClient>;
   routes: Route[];
-  vehicles: React.MutableRefObject<Vehicles>;
+  vehicleData: React.MutableRefObject<RealtimeDataState>;
 }
 
-export const Map: React.FunctionComponent<MapProps> = ({ vehicles }) => {
-  const [mapState] = useMap();
+const initialViewState = {
+  // Helsinki city centre
+  longitude: 24.95,
+  latitude: 60.17,
+  zoom: 12,
+  pitch: 0,
+  bearing: 0,
+};
 
-  const [markers] = useMarkers(vehicles.current)(mapState);
+const positionOptions = { enableHighAccuracy: true };
+
+const geolocateStyle = {
+  style: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    margin: 10,
+  },
+};
+
+export const MapComponent: React.FunctionComponent<MapProps> = ({
+  vehicleData,
+}) => {
+  const deckGlRef = React.useRef<DeckGL>(null);
 
   useAnimationFrame(() => {
-    animateMarkers(vehicles.current)(markers);
+    animateMarkers(vehicleData.current)(deckGlRef);
   });
 
-  return <MapContainer id="mapbox-root" />;
+  const [viewport, setViewport] = React.useState(initialViewState);
+  const onViewStateChange = React.useCallback(
+    (viewport: ViewStateChangeInfo) => {
+      setViewport(viewport as any);
+    },
+    [setViewport],
+  );
+
+  return (
+    <DeckGL
+      ref={deckGlRef}
+      controller={true}
+      initialViewState={initialViewState}
+      {...viewport}
+    >
+      <ReactMapGL
+        mapStyle={`https://api.maptiler.com/maps/basic/style.json?key=${
+          process.env.REACT_APP_MAPTILER_KEY
+        }`}
+        width="100%"
+        height="100%"
+        {...viewport}
+        // Roughly corresponds to Greater Helsinki area
+        // maxBounds={[[24, 59.8], [26, 60.5]]}
+        // minZoom={10}
+        reuseMaps
+        preventStyleDiffing={false}
+      >
+        {/* <GeolocateControl
+          showUserLocation={true}
+          trackUserLocation={true}
+          positionOptions={positionOptions}
+          onViewStateChange={onViewStateChange}
+          {...geolocateStyle}
+        /> */}
+      </ReactMapGL>
+    </DeckGL>
+  );
 };
